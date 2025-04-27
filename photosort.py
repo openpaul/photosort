@@ -15,6 +15,7 @@
 #   "imbalanced-learn==0.12.4",
 #   "appdirs==1.4.4",
 #   "numpy>2.0.0",
+#   "lightning",
 #   "loguru",
 #   "imbalanced-learn",
 #   "rich",
