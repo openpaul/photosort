@@ -68,6 +68,7 @@ from pillow_heif import register_heif_opener
 from sklearn import ensemble, neural_network, svm
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from sklearn.model_selection import GridSearchCV
+
 from tqdm import tqdm
 
 APP_FOLDER = Path(appdirs.user_data_dir("imageclassifier", "openpaul"))
@@ -92,38 +93,46 @@ class Database:
     def setup_tables(self):
         if self.use_vec:
             # Create virtual table for image embeddings
-            self.connection.execute(f"""
+            self.connection.execute(
+                f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0(
                 embedding float[{self.dimension}],
             )
-            """)
-            self.connection.execute("""
+            """
+            )
+            self.connection.execute(
+                """
             CREATE TABLE IF NOT EXISTS image_embeddings (
                 rowid INTEGER PRIMARY KEY AUTOINCREMENT,
                 hash TEXT,
                 model_name TEXT,
                 UNIQUE(hash, model_name)
             )
-            """)
+            """
+            )
 
         else:
             # Create a regular table for image embeddings
-            self.connection.execute("""
+            self.connection.execute(
+                """
             CREATE TABLE IF NOT EXISTS image_embeddings (
                 embedding BLOB,
                 hash TEXT,
                 model_name TEXT,
                 UNIQUE(hash, model_name)
             )
-            """)
+            """
+            )
 
         # Create table for image metadata
-        self.connection.execute("""
+        self.connection.execute(
+            """
         CREATE TABLE IF NOT EXISTS image_metadata (
             path TEXT,
             hash TEXT UNIQUE
         )
-        """)
+        """
+        )
         self.connection.commit()
 
     def insert_embedding(self, embedding: torch.Tensor, img_hash: str, model_name: str):
@@ -201,18 +210,22 @@ class Database:
     def get_all_embeddings(self):
         cursor = self.connection.cursor()
         if self.use_vec:
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT ie.hash, ie.model_name, e.embedding, im.path
                 FROM image_embeddings ie
                 JOIN embeddings e ON ie.rowid = e.rowid
                 JOIN image_metadata im ON ie.hash = im.hash
-            """)
+            """
+            )
         else:
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT ie.hash, ie.model_name, ie.embedding, im.path
                 FROM image_embeddings ie
                 JOIN image_metadata im ON ie.hash = im.hash
-            """)
+            """
+            )
 
         results = cursor.fetchall()
         embeddings = []
@@ -688,6 +701,7 @@ class Classifier:
 
         X, y = self._get_data(dataset)
         self._train_and_crossvalidate(X, y)
+        print(self.label_map)
 
     def _train_and_crossvalidate(self, X: np.ndarray, y: np.ndarray):
         logger.debug(f"Training {self.mode}. Shape of input data: {X.shape} {y.shape}")
@@ -697,7 +711,7 @@ class Classifier:
             param_grid = {"kernel": ["linear", "rbf"], "C": [0.1, 1, 10, 20]}
         elif self.mode == "RandomForest":
             param_grid = {
-                "n_estimators": [50, 100, 200],
+                "n_estimators": [50, 100, 200, 500],
                 "max_depth": [None, 10, 20, 50],
             }
         elif self.mode == "LogisticRegression":
@@ -713,8 +727,9 @@ class Classifier:
             }
 
         # Perform GridSearchCV
+        logger.debug("Running GridSearch on the parameter space")
         grid_search = GridSearchCV(
-            estimator=self.classifier, param_grid=param_grid, cv=5
+            estimator=self.classifier, param_grid=param_grid, cv=5, refit=True
         )
         grid_search.fit(X, y)
         print(grid_search.best_params_)
@@ -786,6 +801,8 @@ def process_file(
     folder = output / date_prefix / predicted_label
     folder.mkdir(parents=True, exist_ok=True)
     target_path = folder / media_file.path.name
+    doubles_path = output / "double"
+    doubles_path.mkdir(parents=True, exist_ok=True)
 
     if target_path == media_file.path:
         logger.debug("Input and output location are the same")
@@ -798,8 +815,21 @@ def process_file(
         else:
             logger.debug(f"Copying {media_file.path} to {target_path}")
             shutil.copy(media_file.path, target_path)
+    elif target_path.exists():
+        if dry_run:
+            logger.trace(f"File '{media_file.path}' already exists in {target_path}")
+        elif move:
+            logger.warning(
+                f"File '{media_file.path}' already exists in {target_path}, moving to doubles folder"
+            )
+            shutil.move(media_file.path, doubles_path / media_file.path.name)
+        else:
+            logger.warning(
+                f"File '{media_file.path}' already exists in {target_path}, copying to doubles folder"
+            )
+            shutil.copy(media_file.path, doubles_path / media_file.path.name)
     else:
-        logger.trace(f"File '{media_file.path}' already exists in {target_path}")
+        logger.error("Could not process file, unknown error")
 
 
 def delete_empty_subfolders(folder_path: Path):
@@ -850,9 +880,12 @@ def _ml_evaluate(predicted: list, labels: list):
     categories = list(set(labels))
     sorted(categories)
     overall_accuracy = accuracy_score(labels, predicted)
-    overall_precision, overall_recall, overall_f1, overall_support = (
-        precision_recall_fscore_support(labels, predicted, average="macro")
-    )
+    (
+        overall_precision,
+        overall_recall,
+        overall_f1,
+        overall_support,
+    ) = precision_recall_fscore_support(labels, predicted, average="macro")
 
     overall_metrics = {
         "Category": ["Overall"],
